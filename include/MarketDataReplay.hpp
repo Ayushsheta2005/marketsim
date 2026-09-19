@@ -1,3 +1,6 @@
+// Copyright 2026 Ayush Sheta (https://github.com/Ayushsheta2005)
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include "OrderBook.hpp"
@@ -50,7 +53,7 @@ struct LobsterSummary {
     Quantity executed_quantity = 0;                   // sum of type-4 sizes
 };
 
-LobsterSummary replay_market_data(std::istream& input, OrderBook& book);
+LobsterSummary replay_lobster_messages(std::istream& input, OrderBook& book);
 
 struct LobsterBookRow {
     std::vector<LevelSnapshot> asks;

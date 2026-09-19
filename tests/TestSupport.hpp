@@ -1,3 +1,6 @@
+// Copyright 2026 Ayush Sheta (https://github.com/Ayushsheta2005)
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstdlib>

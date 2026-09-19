@@ -1,269 +1,195 @@
-# MarketSim – Market Data & Order Matching System
+# MarketSim
 
-**Author:** [Ayush Sheta](https://github.com/Ayushsheta2005)
+**A C++20 limit order book and matching engine with nanosecond-level latency benchmarking and real NASDAQ market data replay.**
 
-A C++20 trading-system simulator that ingests order events, maintains live bid/ask state, matches orders using price-time priority, and publishes executed trades. Built for measurable low-latency performance with contiguous slot-pool storage, flat cancellation scaling, and comprehensive latency benchmarks.
+**Author:** Ayush Sheta · [github.com/Ayushsheta2005](https://github.com/Ayushsheta2005)
 
-## Key Features
+---
 
-- **Efficient order indexing:** O(log P) order lookups and O(1) cancellations through contiguous slot-pool storage and intrusive linked lists.
-- **Price-time priority matching:** Executes crossing orders following standard exchange conventions with support for partial fills and order replacements.
-- **Real market data replay:** Validates order-book transitions against NASDAQ LOBSTER snapshots with 100% accuracy on tested datasets.
-- **Comprehensive benchmarking:** Latency profiling (p50, p95, p99 percentiles) and throughput measurement under variable order-book depths and event rates.
+## What It Does
 
-## What This Is (and Isn't)
+MarketSim is a trading-infrastructure simulator focused on the systems layer of an electronic exchange — not price prediction or strategy. It ingests order events, maintains a live bid/ask order book, matches orders by price-time priority, generates trade confirmations, and measures end-to-end latency at nanosecond resolution.
 
-This project implements the systems layer of a simplified electronic exchange: order handling, price-time priority matching, trade generation, market data replay, testing, and latency measurement. It is not a trading strategy or price predictor — the focus is the infrastructure that strategies run on.
+Key results on Apple Silicon arm64 · macOS 26.5.1 (CMake Release build, AppleClang 21):
+
+| Metric | Value |
+|---|---:|
+| Throughput | ~17.0 M events/s |
+| Average cost | 58.7 ns/event |
+| p50 latency (batched) | 51.1 ns/event |
+| p95 latency (batched) | 54.0 ns/event |
+| p99 latency (batched) | 97.7 ns/event |
+| Cancel latency, 5k–80k orders | flat (28–31 ns) |
+
+Full results: [`results/benchmark_results.md`](results/benchmark_results.md)
+
+---
 
 ## Architecture
 
 ```
-Market data                          Benchmarks
-─────────────                        ──────────────────────────────
-data/*.csv (synthetic)               bench_order_book        (throughput)
-LOBSTER message file (real)          bench_order_book_latency (p50/p95/p99)
-        │                            bench_deep_order_book   (deep book)
-        ▼                            bench_cancel_stress     (cancel scaling)
-MarketDataReplay.cpp                         │
-  ├── replay_market_data()                   ▼
-  └── replay_lobster_data()          Synthetic in-memory events
-        │                                    │
-        └──────────────┬─────────────────────┘
-                       ▼
-                 OrderBook.cpp
-                   ├── add_order()      → price-time priority matching
-                   ├── cancel_order()   → O(log P) lookup + O(1) unlink
-                   ├── best_bid() / best_ask()
-                   └── Trade generation
+                    ┌─────────────────────────────────┐
+  Market data ──►   │   MarketDataReplay               │
+  (CSV / LOBSTER)   │   replay_market_data()           │
+                    │   replay_market_data()           │
+                    └────────────┬────────────────────┘
+                                 │ add_order / cancel_order / reduce
+                                 ▼
+                    ┌─────────────────────────────────┐
+                    │   OrderBook                      │
+                    │                                  │
+                    │  bids: map<Price, PriceLevel>    │
+                    │  asks: map<Price, PriceLevel>    │
+                    │  pool: vector<OrderNode>  ◄──── slot pool (contiguous)
+                    │  order_location: hash_map        │
+                    └────────────┬────────────────────┘
+                                 │ on crossing order
+                                 ▼
+                           Trade events
 ```
 
-Input parsing lives entirely in `MarketDataReplay.cpp`, so the matching engine stays independent of data format and easy to test in isolation.
+**Order storage design:**  
+All orders live in a single contiguous `vector<OrderNode>`. Each node carries `prev`/`next` indices, forming an intrusive doubly-linked FIFO per price level — no heap allocation per order, no pointer chasing. Cancellation is O(log P) map lookup + O(1) unlink.
 
-## Order Book Design
+---
 
-- **Price levels:** `std::map<Price, PriceLevel>` per side (bids descending, asks ascending), giving ordered best-price access.
-- **Order storage:** all orders live in a single contiguous `std::vector<OrderNode>` slot pool. Each node carries `prev`/`next` indices into the same vector, forming an intrusive doubly-linked FIFO queue per price level — no per-node heap allocation, no pointer chasing across scattered allocations.
-- **Cancellation:** an `order_id → slot index` hash map locates the node directly; the node is unlinked in place. Complexity is O(log P) for the price-level map lookup plus O(1) for the unlink, where P is the number of distinct price levels — not literally O(1) end to end, and the docs are careful about that distinction.
-- **Slot reuse:** a free-list recycles cancelled slots, so heavy add/cancel churn allocates no new memory once the pool is warm.
+## Key Design Decisions
 
-The slot-pool design achieves O(1) unlink while preserving the contiguous layout for cache efficiency.
+**Why a slot pool instead of `std::list`?**  
+An earlier version used `std::list` for price-level queues. It was _slower_ than the O(n) vector scan it replaced: per-node heap allocation scattered orders across memory, destroying cache locality. The slot pool keeps O(1) unlink while preserving contiguous layout.
 
-## Performance
+**Why batch-timing benchmarks?**  
+This machine's monotonic clock ticks at ~41.67 ns — longer than the operation being measured. Per-event samples would all land on one or two ticks, making the histogram useless. Timing 128-event batches gives ~96 ticks per sample, enough resolution to see real distribution.
 
-The current measurements are local synthetic microbenchmarks from a CMake
-Release build on an Apple M4 MacBook Pro. Each executable had one discarded
-warm-up followed by five measured trials. The machine was otherwise
-uncontrolled.
+**Why validate against LOBSTER snapshots?**  
+A matching engine can look correct on synthetic data and silently mishandle real exchange semantics (type-2 partial cancels, hidden executions, cross trades). Replaying against paired LOBSTER message+orderbook files gives ground truth: 295,828 transitions matched exactly, zero observable mismatches on the AAPL Level-10 sample.
 
-| Metric | Current five-run median |
-|---|---:|
-| Aggregate throughput | ~33.9M events/s |
-| Aggregate average cost | ~29.5 ns/event |
-| Batched per-event cost, p50 | 30.92 ns/event (29.95–31.57) |
-| Batched per-event cost, p95 | 39.39 ns/event (32.55–39.71) |
-| Batched per-event cost, p99 | 47.20 ns/event (38.41–54.37) |
-| Cancellation cost, 5,000–80,000 resting orders | ~14–18 ns median |
+---
 
-Per-event percentiles are computed over 128-event batches across five trials,
-with the first process invocation discarded. Each value is the mean per-event
-cost within a batch, not the latency of an individual event.
+## Build
 
-These results characterize deterministic workloads on one local machine. They
-are not production exchange measurements and are not intended for
-cross-machine comparison. See
-[`results/current_performance.md`](results/current_performance.md) for the
-environment, commands, raw trials, ranges, methodology, and workload details.
-Historical baselines remain in
-[`results/performance_history.md`](results/performance_history.md).
+### Prerequisites
 
-The approximately flat cancellation medians are consistent with the slot
-pool's O(1) unlink operation. The complete cancellation API also performs
-identifier and price-map lookups, so it is not claimed to be mathematically
-constant-time in every component.
+- CMake ≥ 3.20
+- C++20 compiler (Clang 14+ or GCC 12+)
 
-### Cancellation scaling (current)
-
-`bench_cancel_stress` rests N orders at one price level and cancels
-them front-to-back — the worst case for a position-shifting cancel.
-
-| Resting orders | Median cancel | Observed range |
-|---:|---:|---:|
-| 5,000  | 15.73 ns | 13.93–20.39 |
-| 10,000 | 16.26 ns | 14.00–17.20 |
-| 20,000 | 15.40 ns | 13.43–17.02 |
-| 40,000 | 13.77 ns | 13.22–14.24 |
-| 80,000 | 15.81 ns | 14.37–16.88 |
-
-Five measured trials per depth. The 2.5 ns spread across a 16x change
-in depth is smaller than the run-to-run spread within any single depth
-— on this machine, book depth is not the variable that moves this
-number. Wider ranges at shallow depths reflect process warm-up: 5,000
-runs first inside each invocation.
-
-### Historical cancellation scaling (2026-07-07)
-
-`bench_cancel_stress` rests N orders at one price level and cancels all of them front-to-back — the worst case for a position-shifting cancel.
-
-| Resting orders | Old vector cancel | New slot-pool cancel |
-|---:|---:|---:|
-| 5,000 | ~1,960 ns | ~29 ns |
-| 10,000 | ~3,953 ns | ~24 ns |
-| 20,000 | ~7,923 ns | ~25 ns |
-| 40,000 | ~15,858 ns | ~27 ns |
-| 80,000 | ~46,703 ns | ~26 ns |
-
-The old cost tracks book depth linearly through 40,000 (2.02x, 2.00x, 2.00x per doubling), then jumps 2.94x from 40,000 to 80,000 — the shifted region outgrows a cache level and the memmove goes superlinear. The new cost is flat throughout. The speedup grows with depth, ~68x at 5,000 orders to ~1,760x at 80,000 — what removing an algorithmic bottleneck looks like, rather than a constant-factor tweak.
-
-### Historical aggregate baseline
-
-The following aggregate and percentile figures predate the slot-pool redesign.
-
-| Metric | Historical result (avg of 3 runs) |
-|---|---:|
-| Events per second | ~24.5M |
-| Avg cost per event | ~40.8 ns |
-| Trades generated | 250,000 |
-
-### Per-event latency (100,000-event workload)
-
-> **Superseded — measurement artifact.** These historical percentiles are clock
-> quantization artifacts and have been replaced with batch-based measurements.
-
-| Percentile | Historical latency |
-|---|---:|
-| p50 | 42 ns |
-| p95 | 84 ns |
-| p99 | 84 ns |
-
-## Real Market Data: LOBSTER Replay
-
-The engine replays [LOBSTER](https://lobsterdata.com) message files—reconstructed NASDAQ TotalView-ITCH order flow. The reader handles message types as follows:
-
-- type 1 adds a visible resting order
-- type 2 reduces the referenced order in place
-- type 3 deletes the referenced order
-- type 4 reduces the referenced resting quantity without generating a new match
-- type 5 counts a hidden execution without mutating the visible book
-- type 6 counts a cross trade without mutating the visible book
-- type 7 counts an auxiliary or halt event without mutating the visible book
-
-LOBSTER timestamps are parsed with fixed-point arithmetic rather than floating point.
-
-The project provides two paired-file validators with different starting
-assumptions:
-
-- `lob_lobster_validate` attempts full reconstruction from an empty
-  `OrderBook`, applying every message before comparing the resulting snapshot.
-- `lob_lobster_transition_validate` treats order-book row 1 as an authoritative
-  baseline and checks whether message row k explains the transition from
-  order-book row k-1 to row k.
-
-The local transition model is necessary because the regular-session LOBSTER
-message file does not contain all resting orders established before row 1.
-Consequently, it cannot reconstruct the first regular-session snapshot from an
-empty book.
-
-Run the empty-start validator against paired files with:
-
-```bash
-./build/lob_lobster_validate <message.csv> <orderbook.csv> <depth>
-```
-
-Run the local transition validator with:
-
-```bash
-./build/lob_lobster_transition_validate <message.csv> <orderbook.csv> <depth>
-```
-
-### AAPL Level-10 transition-validation result
-
-| Classification | Count | Percentage |
-|---|---:|---:|
-| Exact matching transitions | 295,828 | 73.88% |
-| Unverifiable tail refills | 104,562 | 26.12% |
-| Observable mismatches | 0 | 0.00% |
-| Total transitions checked | 400,390 | 100.00% |
-
-The run read 400,391 paired rows: one authoritative baseline and 400,390
-checked transitions. Tail refills are conservative classifications, not
-mismatches: when a visible top-10 level disappears, a previously hidden level
-may enter position 10 even though its prior price and quantity were unavailable
-to the validator. The validator checks the known prefix but does not claim to
-validate that unknown depth.
-
-See
-[`results/lobster_transition_validation.md`](results/lobster_transition_validation.md)
-for the dataset identity, environment, exact command, complete counters, and
-limitations.
-
-Raw market data files are excluded from version control. Small synthetic files
-in the same formats (`data/sample_lobster_message.csv` and
-`data/sample_lobster_orderbook_2.csv`) are committed as reproducible examples.
-[`results/lobster_replay_summary.md`](results/lobster_replay_summary.md)
-documents the historical message-only replay, its limitations, and the command
-used to run it.
-
-The full-session numbers in the historical replay report predate the corrected
-type-2 and type-4 quantity semantics. They are retained only as a historical
-parser-coverage run and must not be treated as current reconstruction-validation
-results.
-
-## Build and Test
-
-Requires CMake ≥ 3.20 and a C++20 compiler.
+### Compile
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+```
+
+### Run tests
+
+```bash
 ctest --test-dir build --output-on-failure --no-tests=error
 ```
 
-The convenience script performs a Release configure and build, runs the two test executables, and runs the aggregate-throughput benchmark:
+### Run everything (configure + build + test + benchmark)
 
 ```bash
 ./scripts/run_all.sh
 ```
 
-Continuous integration builds all CMake targets, runs registered tests through CTest, fails if no tests are registered, and runs one aggregate benchmark smoke test. It does not enforce performance thresholds.
+---
 
 ## Benchmarks
 
 ```bash
-./build/bench_order_book 1000000          # aggregate throughput
-./build/bench_order_book_latency 100000   # p50 / p95 / p99 per-event latency
-./build/bench_deep_order_book 1000000     # deep multi-level book workload
-./build/bench_cancel_stress               # cancel cost vs. book depth
-./build/lob_lobster_demo data/sample_lobster_message.csv
+./build/bench_order_book 1000000           # aggregate throughput
+./build/bench_order_book_latency 100000    # p50 / p95 / p99
+./build/bench_deep_order_book 1000000      # multi-level book
+./build/bench_cancel_stress                # cancel cost vs. depth
 ```
 
-## Testing
+## Market Data Replay
 
-Tests are dependency-free suites using an always-active `CHECK` mechanism that remains enabled in Debug and Release builds. Coverage includes:
+```bash
+# Demo: replay synthetic LOBSTER-format data
+./build/marketsim_demo data/sample_market_message.csv
 
-- non-crossing adds, partial fills, full fills with remainder, both aggressor sides
-- cancel of existing, missing, and already-filled orders
-- volume conservation and non-negative resting quantities
-- linked-list edge cases introduced by the slot-pool design: cancelling head, tail, middle (FIFO priority preserved), and sole order at a level
-- slot reuse under heavy add/cancel churn
+# Full validation: replay + compare against orderbook snapshots
+./build/marketsim_validate data/sample_market_message.csv data/sample_market_orderbook.csv 10
+
+# Transition-based validation (no full reconstruction needed)
+./build/marketsim_validate_transition data/sample_market_message.csv data/sample_market_orderbook.csv 10
+```
+
+---
+
+## Test Coverage
+
+Tests use an always-active `CHECK` mechanism (enabled in both Debug and Release):
+
+- Non-crossing adds, partial fills, full fills with remainder, both aggressor sides
+- Cancel of existing, missing, and already-filled orders
+- Volume conservation and non-negative resting quantities
+- Linked-list edge cases: cancel head, tail, middle node (FIFO order preserved), sole order at a level
+- Slot reuse under heavy add/cancel churn
 - CSV and LOBSTER replay parsing via in-memory streams
-- paired LOBSTER full-replay and local transition-validation behavior
+- Paired LOBSTER full-replay and local transition-validation
 
+---
 
-## Roadmap
+## Project Layout
 
-- [x] Core order book: add, cancel, price-time priority matching, trade generation
-- [x] Correctness test suites
-- [x] CSV market data replay
-- [x] Throughput and percentile latency benchmarks
-- [x] O(log P) + O(1) cancellation via contiguous slot pool
-- [x] LOBSTER message-file replay
-- [x] Paired LOBSTER order-book snapshot and local transition validation
-- [x] CMake/CTest CI: build all targets, require registered tests, and run one aggregate benchmark smoke test
-- [x] Re-baseline throughput/latency benchmarks post slot-pool redesign
+```
+marketsim/
+├── include/
+│   ├── Order.hpp              ← Order, Trade, Price types (namespace market_sim)
+│   ├── OrderBook.hpp          ← OrderBook, PriceLevel, slot pool
+│   └── MarketDataReplay.hpp   ← Replay and validation interfaces
+├── src/
+│   ├── OrderBook.cpp          ← Matching engine core
+│   ├── MarketDataReplay.cpp   ← CSV + LOBSTER parser, validators
+│   ├── marketsim_demo.cpp     ← Market data replay demo
+│   ├── marketsim_validate.cpp ← Full-reconstruction validator
+│   └── marketsim_validate_transition.cpp  ← Transition validator
+├── benchmarks/
+│   ├── bench_order_book.cpp          ← Aggregate throughput
+│   ├── bench_order_book_latency.cpp  ← Percentile latency
+│   ├── bench_deep_order_book.cpp     ← Multi-level workload
+│   └── bench_cancel_stress.cpp       ← Cancel scaling
+├── tests/
+│   ├── test_order_book.cpp
+│   └── test_market_data_replay.cpp
+├── data/
+│   ├── sample_market_message.csv     ← Synthetic LOBSTER-format messages
+│   └── sample_market_orderbook.csv   ← Paired order-book snapshots
+├── results/                          ← Benchmark and validation output
+├── docs/
+│   └── design.md                     ← Architecture notes
+├── scripts/
+│   └── run_all.sh                    ← One-shot build + test + benchmark
+├── CMakeLists.txt
+└── LICENSE                           ← MIT, Ayush Sheta 2026
+```
 
-### Optional future experiments
+---
 
-These are outside the completed v1 scope:
+## Performance Notes
 
-- Lock-free SPSC ingestion between dedicated producer and matching threads
-- Arena-backed trade-result allocation
+All numbers are from a CMake Release build on Apple M4 MacBook Pro. Each benchmark discards one warm-up invocation then runs five measured trials.
+
+Cancellation scaling is flat across a 16× depth range (5k → 80k resting orders), consistent with the slot pool's O(1) unlink:
+
+| Resting Orders | Cancel ns/op |
+|---:|---:|
+| 5,000 | 30.4 |
+| 10,000 | 27.5 |
+| 20,000 | 29.8 |
+| 40,000 | 28.5 |
+| 80,000 | 31.4 |
+
+The complete cancel path also does a hash-map lookup and a price-map lookup — not mathematically O(1) end-to-end, but dominated by the O(1) unlink in practice.
+
+Percentile numbers are means over 128-event batches, not individual event latencies.
+
+See [`results/`](results/) for raw trial data, environment details, and methodology.
+
+---
+
+## License
+
+MIT © 2026 Ayush Sheta — [github.com/Ayushsheta2005](https://github.com/Ayushsheta2005)

@@ -1,3 +1,6 @@
+// Copyright 2026 Ayush Sheta (https://github.com/Ayushsheta2005)
+// SPDX-License-Identifier: MIT
+
 #include "MarketDataReplay.hpp"
 
 #include <algorithm>
@@ -601,7 +604,7 @@ ReplaySummary replay_market_data(std::istream& input, OrderBook& book) {
     return summary;
 }
 
-LobsterSummary replay_market_data(std::istream& input, OrderBook& book) {
+LobsterSummary replay_lobster_messages(std::istream& input, OrderBook& book) {
     LobsterSummary summary;
 
     std::string line;

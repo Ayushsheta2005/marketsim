@@ -1,3 +1,6 @@
+// Copyright 2026 Ayush Sheta (https://github.com/Ayushsheta2005)
+// SPDX-License-Identifier: MIT
+
 #include "MarketDataReplay.hpp"
 #include "TestSupport.hpp"
 
@@ -84,7 +87,7 @@ void test_lobster_partial_cancel_subtracts_event_quantity() {
     );
 
     market_sim::OrderBook book;
-    auto summary = market_sim::replay_market_data(input, book);
+    auto summary = market_sim::replay_lobster_messages(input, book);
 
     CHECK(summary.events_processed == 2);
     CHECK(summary.partial_cancels == 1);
@@ -107,7 +110,7 @@ void test_lobster_partial_cancel_preserves_fifo_position() {
     );
 
     market_sim::OrderBook book;
-    auto summary = market_sim::replay_market_data(input, book);
+    auto summary = market_sim::replay_lobster_messages(input, book);
 
     CHECK(summary.partial_cancels == 1);
     CHECK(summary.successful_cancels == 1);
@@ -128,7 +131,7 @@ void test_lobster_visible_execution_reduces_referenced_order() {
     );
 
     market_sim::OrderBook book;
-    auto summary = market_sim::replay_market_data(input, book);
+    auto summary = market_sim::replay_lobster_messages(input, book);
 
     CHECK(summary.executions == 1);
     CHECK(summary.successful_execution_reductions == 1);
@@ -149,7 +152,7 @@ void test_lobster_visible_execution_exhausts_order() {
     );
 
     market_sim::OrderBook book;
-    auto summary = market_sim::replay_market_data(input, book);
+    auto summary = market_sim::replay_lobster_messages(input, book);
 
     CHECK(summary.executions == 1);
     CHECK(summary.successful_execution_reductions == 1);
@@ -165,7 +168,7 @@ void test_lobster_cross_trade_does_not_mutate_visible_book() {
     );
 
     market_sim::OrderBook book;
-    auto summary = market_sim::replay_market_data(input, book);
+    auto summary = market_sim::replay_lobster_messages(input, book);
 
     CHECK(summary.events_processed == 2);
     CHECK(summary.cross_trades == 1);
@@ -188,7 +191,7 @@ void test_lobster_unsuccessful_reductions_are_not_counted() {
     );
 
     market_sim::OrderBook book;
-    auto summary = market_sim::replay_market_data(input, book);
+    auto summary = market_sim::replay_lobster_messages(input, book);
 
     CHECK(summary.events_processed == 3);
     CHECK(summary.partial_cancels == 1);

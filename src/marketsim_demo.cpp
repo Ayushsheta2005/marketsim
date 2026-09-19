@@ -1,3 +1,6 @@
+// Copyright 2026 Ayush Sheta (https://github.com/Ayushsheta2005)
+// SPDX-License-Identifier: MIT
+
 #include "MarketDataReplay.hpp"
 
 #include <fstream>
@@ -21,9 +24,9 @@ int main(int argc, char* argv[]) {
     }
 
     market_sim::OrderBook book;
-    auto summary = market_sim::replay_market_data(input, book);
+    auto summary = market_sim::replay_lobster_messages(input, book);
 
-    std::cout << "LOBSTER replay: " << path << "\n";
+    std::cout << "Market data replay: " << path << "\n";
     std::cout << "Events processed:    " << summary.events_processed << "\n";
     std::cout << "New limit orders:    " << summary.new_orders << "\n";
     std::cout << "Partial cancels:     " << summary.partial_cancels << "\n";
